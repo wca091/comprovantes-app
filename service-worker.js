@@ -1,4 +1,7 @@
-// Nome da "gaveta" onde vamos guardar o último comprovante recebido
+// Endereço do servidor (Cloudflare Worker) que processa o comprovante
+const WORKER_URL = 'https://comprovantes-worker.williamamorim126.workers.dev/';
+
+// Nome da "gaveta" onde guardamos informações do último envio
 const CACHE_NAME = 'comprovantes-share-cache';
 
 // Instala o service worker imediatamente, sem esperar
@@ -12,12 +15,12 @@ self.addEventListener('activate', (event) => {
 });
 
 // Aqui é onde a mágica acontece: o Android manda o arquivo compartilhado
-// para essa URL (/share-target), e é o service worker que intercepta essa
-// chamada antes mesmo dela chegar em qualquer servidor.
+// para essa URL (algo terminando em /share-target), e é o service worker
+// que intercepta essa chamada antes mesmo dela chegar em qualquer servidor.
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  if (event.request.method === 'POST' && url.pathname === '/share-target') {
+  if (event.request.method === 'POST' && url.pathname.endsWith('/share-target')) {
     event.respondWith(handleShareTarget(event.request));
   }
 });
@@ -28,29 +31,37 @@ async function handleShareTarget(request) {
     const formData = await request.formData();
     const file = formData.get('comprovante');
 
-    if (file) {
-      const cache = await caches.open(CACHE_NAME);
-
-      // Por enquanto guardamos só localmente (nesta etapa ainda não existe
-      // um servidor de verdade). Isso vai virar um "enviar para o backend"
-      // na próxima etapa do projeto.
-      await cache.put(
-        '/ultimo-comprovante',
-        new Response(file, { headers: { 'Content-Type': file.type } })
-      );
-
-      const metadata = { name: file.name, type: file.type, size: file.size };
-      await cache.put(
-        '/ultimo-comprovante-info',
-        new Response(JSON.stringify(metadata), {
-          headers: { 'Content-Type': 'application/json' },
-        })
-      );
+    if (!file) {
+      return Response.redirect('erro.html', 303);
     }
 
-    // Redireciona para a tela de sucesso (303 evita reenvio se a página for atualizada)
-    return Response.redirect('/sucesso.html', 303);
+    // Manda o arquivo de verdade para o servidor (Cloudflare Worker),
+    // que usa IA para ler Data/Descrição/Valor e salva na planilha.
+    const formParaEnviar = new FormData();
+    formParaEnviar.append('comprovante', file, file.name);
+
+    const resposta = await fetch(WORKER_URL, {
+      method: 'POST',
+      body: formParaEnviar,
+    });
+
+    const resultado = await resposta.json();
+
+    // Guarda o resultado (sucesso ou erro) para a tela poder exibir os dados
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(
+      'ultimo-resultado',
+      new Response(JSON.stringify(resultado), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    if (resultado.success) {
+      return Response.redirect('sucesso.html', 303);
+    } else {
+      return Response.redirect('erro.html', 303);
+    }
   } catch (err) {
-    return Response.redirect('/erro.html', 303);
+    return Response.redirect('erro.html', 303);
   }
 }
